@@ -228,7 +228,6 @@ ulong 	innobase_large_page_size = 0;
 /* The default values for the following, type long or longlong, start-up
 parameters are declared in mysqld.cc: */
 
-long innobase_additional_mem_pool_size = 1*1024*1024L;
 long innobase_buffer_pool_awe_mem_mb = 0;
 long innobase_file_io_threads = 4;
 long innobase_read_io_threads = 4;
@@ -494,7 +493,6 @@ enum options_xtrabackup
   OPT_INNODB_MAX_PURGE_LAG,
   OPT_INNODB_ROLLBACK_ON_TIMEOUT,
   OPT_INNODB_STATUS_FILE,
-  OPT_INNODB_ADDITIONAL_MEM_POOL_SIZE,
   OPT_INNODB_AUTOEXTEND_INCREMENT,
   OPT_INNODB_BUFFER_POOL_SIZE,
   OPT_INNODB_COMMIT_CONCURRENCY,
@@ -1594,8 +1592,6 @@ mem_free_and_error:
 
 	//srv_buf_pool_size = (ulint) innobase_buffer_pool_size;
 	srv_buf_pool_size = (ulint) xtrabackup_use_memory;
-
-	srv_mem_pool_size = (ulint) innobase_additional_mem_pool_size;
 
 	srv_n_file_io_threads = (ulint) innobase_file_io_threads;
 	srv_n_read_io_threads = (ulint) innobase_read_io_threads;
@@ -3688,7 +3684,7 @@ xtrabackup_backup_func(void)
 	crc_init();
 
 #ifdef WITH_INNODB_DISALLOW_WRITES
-	srv_allow_writes_event = os_event_create();
+	srv_allow_writes_event = os_event_create(0);
 	os_event_set(srv_allow_writes_event);
 #endif
 
@@ -3870,7 +3866,7 @@ reread_log_header:
 		os_thread_id_t io_watching_thread_id;
 
 		io_ticket = xtrabackup_throttle;
-		wait_throttle = os_event_create();
+		wait_throttle = os_event_create(0);
 
 		os_thread_create(io_watching_thread, NULL,
 				 &io_watching_thread_id);
@@ -3881,7 +3877,7 @@ reread_log_header:
 		exit(EXIT_FAILURE);
 
 
-	log_copying_stop = os_event_create();
+	log_copying_stop = os_event_create(0);
 	os_thread_create(log_copying_thread, NULL, &log_copying_thread_id);
 
 	/* Populate fil_system with tablespaces to copy */
@@ -5536,7 +5532,7 @@ skip_check:
 	ut_crc32_init();
 
 #ifdef WITH_INNODB_DISALLOW_WRITES
-	srv_allow_writes_event = os_event_create();
+	srv_allow_writes_event = os_event_create(0);
 	os_event_set(srv_allow_writes_event);
 #endif
 
