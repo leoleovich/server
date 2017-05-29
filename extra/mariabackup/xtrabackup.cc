@@ -1909,11 +1909,10 @@ xb_read_delta_metadata(const char *filepath, xb_delta_info_t *info)
 	FILE*	fp;
 	char	key[51];
 	char	value[51];
-	my_bool	r			= TRUE;
+	my_bool	r			= FALSE;
 
 	/* set defaults */
-	info->page_size = ULINT_UNDEFINED;
-	info->zip_size = ULINT_UNDEFINED;
+	ulint page_size = ULINT_UNDEFINED, zip_size = 0;
 	info->space_id = ULINT_UNDEFINED;
 
 	fp = fopen(filepath, "r");
@@ -1925,9 +1924,9 @@ xb_read_delta_metadata(const char *filepath, xb_delta_info_t *info)
 	while (!feof(fp)) {
 		if (fscanf(fp, "%50s = %50s\n", key, value) == 2) {
 			if (strcmp(key, "page_size") == 0) {
-				info->page_size = strtoul(value, NULL, 10);
+				page_size = strtoul(value, NULL, 10);
 			} else if (strcmp(key, "zip_size") == 0) {
-				info->zip_size = strtoul(value, NULL, 10);
+				zip_size = strtoul(value, NULL, 10);
 			} else if (strcmp(key, "space_id") == 0) {
 				info->space_id = strtoul(value, NULL, 10);
 			}
@@ -1936,10 +1935,14 @@ xb_read_delta_metadata(const char *filepath, xb_delta_info_t *info)
 
 	fclose(fp);
 
-	if (info->page_size == ULINT_UNDEFINED) {
+	if (page_size == ULINT_UNDEFINED) {
 		msg("xtrabackup: page_size is required in %s\n", filepath);
 		r = FALSE;
+	} else {
+		info->page_size = page_size_t(zip_size ? zip_size : page_size,
+					      page_size, zip_size != 0);
 	}
+
 	if (info->space_id == ULINT_UNDEFINED) {
 		msg("xtrabackup: Warning: This backup was taken with XtraBackup 2.0.1 "
 			"or earlier, some DDL operations between full and incremental "
@@ -1965,7 +1968,10 @@ xb_write_delta_metadata(const char *filename, const xb_delta_info_t *info)
 		 "page_size = %lu\n"
 		 "zip_size = %lu\n"
 		 "space_id = %lu\n",
-		 info->page_size, info->zip_size, info->space_id);
+		 info->page_size.logical(),
+		 info->page_size.is_compressed()
+		 ? info->page_size.physical() : 0,
+		 info->space_id);
 	len = strlen(buf);
 
 	mystat.st_size = len;
@@ -2230,15 +2236,13 @@ check_if_skip_table(
 	return(FALSE);
 }
 
-/***********************************************************************
-Reads the space flags from a given data file and returns the compressed
-page size, or 0 if the space is not compressed. */
-ulint
-xb_get_zip_size(pfs_os_file_t file)
+/** @return the tablespace flags from a given data file
+@retval	ULINT_UNDEFINED	if the file is not readable */
+ulint xb_get_space_flags(pfs_os_file_t file)
 {
 	byte	*buf;
 	byte	*page;
-	ulint	 zip_size;
+	ulint	flags;
 
 	buf = static_cast<byte *>(ut_malloc(2 * UNIV_PAGE_SIZE));
 	page = static_cast<byte *>(ut_align(buf, UNIV_PAGE_SIZE));
@@ -2246,17 +2250,14 @@ xb_get_zip_size(pfs_os_file_t file)
 	IORequest request(IORequest::READ);
 
 	if (os_file_read(request, file, page, 0, UNIV_PAGE_SIZE)) {
-		const page_size_t page_size(fsp_header_get_flags(page));
-
-		zip_size = page_size.is_compressed()
-			? page_size.physical() : 0;
+		flags = fsp_header_get_flags(page);
 	} else {
-		zip_size = ULINT_UNDEFINED;
+		flags = ULINT_UNDEFINED;
 	}
 
 	ut_free(buf);
 
-	return(zip_size);
+	return(flags);
 }
 
 const char*
@@ -2295,7 +2296,6 @@ xtrabackup_copy_datafile(fil_node_t* node, uint thread_n)
 	xb_write_filt_ctxt_t	 write_filt_ctxt;
 	const char		*action;
 	xb_read_filt_t		*read_filter;
-	ibool			is_system;
 	my_bool			rc = FALSE;
 
 	/* Get the name and the path for the tablespace. node->name always
@@ -2310,9 +2310,8 @@ xtrabackup_copy_datafile(fil_node_t* node, uint thread_n)
 	const char* const node_name = node->space->name;
 	const char* const node_path = node->name;
 
-	is_system = !fil_is_user_tablespace_id(node->space->id);
-
-	if (!is_system && check_if_skip_table(node_name)) {
+	if (fil_is_user_tablespace_id(node->space->id)
+	    && check_if_skip_table(node_name)) {
 		msg("[%02u] Skipping %s.\n", thread_n, node_name);
 		return(FALSE);
 	}
@@ -4477,7 +4476,6 @@ xb_delta_open_matching_space(
 	const char*	dbname,		/* in: path to destination database dir */
 	const char*	name,		/* in: name of delta file (without .delta) */
 	ulint		space_id,	/* in: space id of delta file */
-	ulint		zip_size,	/* in: zip_size of tablespace */
 	char*		real_name,	/* out: full path of destination file */
 	size_t		real_name_len,	/* out: buffer size for real_name */
 	ibool* 		success)	/* out: indicates error. TRUE = success */
@@ -4601,20 +4599,8 @@ xb_delta_open_matching_space(
 		goto exit;
 	}
 
-	/* Calculate correct tablespace flags for compressed tablespaces.  */
-	if (!zip_size || zip_size == ULINT_UNDEFINED) {
-		tablespace_flags = 0;
-	}
-	else {
-		tablespace_flags
-			= (get_bit_shift(zip_size >> PAGE_ZIP_MIN_SIZE_SHIFT
-					 << 1)
-			   << DICT_TF_ZSSIZE_SHIFT)
-			| DICT_TF_COMPACT
-			| (DICT_TF_FORMAT_ZIP << DICT_TF_FORMAT_SHIFT);
-		ut_a(dict_tf_get_zip_size(tablespace_flags)
-		     == zip_size);
-	}
+	// FIXME: Test with all innodb_page_size!
+	// FIXME: Get tablespace_flags from the metadata file!
 	*success = xb_space_create_file(real_name, space_id, tablespace_flags,
 					&file);
 	goto exit;
@@ -4724,7 +4710,7 @@ xtrabackup_apply_delta(
 	os_file_set_nocache(src_file, src_path, "OPEN");
 
 	dst_file = xb_delta_open_matching_space(
-			dbname, space_name, info.space_id, info.zip_size,
+			dbname, space_name, info.space_id,
 			dst_path, sizeof(dst_path), &success);
 	if (!success) {
 		msg("xtrabackup: error: cannot open %s\n", dst_path);
@@ -5480,7 +5466,6 @@ xtrabackup_prepare_func(int argc, char ** argv)
 	ulint	err;
 	datafiles_iter_t	*it;
 	fil_node_t		*node;
-	fil_space_t		*space;
 	char			 metadata_path[FN_REFLEN];
 
 	/* cd to target-dir */
@@ -5637,14 +5622,7 @@ skip_check:
 	}
 
 	while ((node = datafiles_iter_next(it)) != NULL) {
-		byte		*header;
-		ulint		 size;
-		ulint		 actual_size;
-		mtr_t		 mtr;
-		buf_block_t	*block;
-		ulint		 flags;
-
-		space = node->space;
+		ulint		actual_size;
 
 		/* Align space sizes along with fsp header. We want to process
 		each space once, so skip all nodes except the first one in a
@@ -5653,19 +5631,20 @@ skip_check:
 			continue;
 		}
 
-		mtr_start(&mtr);
+		mtr_t		mtr;
+		fil_space_t*	space = node->space;
+		mtr.start();
 
-		mtr_s_lock(fil_space_get_latch(space->id, &flags), &mtr);
+		mtr_s_lock(&space->latch, &mtr);
 
-		block = buf_page_get(space->id,
-				     dict_tf_get_zip_size(flags),
-				     0, RW_S_LATCH, &mtr);
-		header = FSP_HEADER_OFFSET + buf_block_get_frame(block);
+		buf_block_t*	block = buf_page_get(
+			page_id_t(space->id, 0), page_size_t(space->flags),
+			RW_S_LATCH, &mtr);
 
-		size = mtr_read_ulint(header + FSP_SIZE, MLOG_4BYTES,
-				      &mtr);
+		unsigned	size = mach_read_from_4(
+			FSP_HEADER_OFFSET + FSP_SIZE + block->frame);
 
-		mtr_commit(&mtr);
+		mtr.commit();
 
 		fil_extend_space_to_desired_size(&actual_size, space->id, size);
 	}

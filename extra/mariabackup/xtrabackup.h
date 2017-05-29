@@ -32,11 +32,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #define XB_FILE_UNDEFINED (-1)
 #endif
 
-typedef struct {
-	ulint	page_size;
-	ulint	zip_size;
-	ulint	space_id;
-} xb_delta_info_t;
+struct xb_delta_info_t
+{
+	xb_delta_info_t(page_size_t page_size, ulint space_id)
+	: page_size(page_size), space_id(space_id) {}
+
+	page_size_t	page_size;
+	ulint		space_id;
+};
 
 /* ======== Datafiles iterator ======== */
 typedef struct {
@@ -179,10 +182,9 @@ ulint xb_data_files_init(void);
 Destroy the tablespace memory cache. */
 void xb_data_files_close(void);
 
-/***********************************************************************
-Reads the space flags from a given data file and returns the compressed
-page size, or 0 if the space is not compressed. */
-ulint xb_get_zip_size(pfs_os_file_t file);
+/** @return the tablespace flags from a given data file
+@retval	ULINT_UNDEFINED	if the file is not readable */
+ulint xb_get_space_flags(pfs_os_file_t file);
 
 /************************************************************************
 Checks if a table specified as a name in the form "database/name" (InnoDB 5.6)
